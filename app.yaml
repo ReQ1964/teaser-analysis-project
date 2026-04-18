@@ -1,0 +1,28 @@
+runtime: nodejs22
+instance_class: F1
+
+env_variables:
+  NODE_ENV: "production"
+  PORT: "8080"
+  
+  # Firebase / Google Cloud
+  VITE_FIREBASE_STORAGE_BUCKET: "your-project-id.firebasestorage.app"
+  FIREBASE_DATABASE_URL: "https://your-project-id.firebaseio.com"
+  GOOGLE_APPLICATION_CREDENTIALS: "./server/service-account.json"
+  
+  # CORS
+  ALLOWED_ORIGIN: "https://your-app-id.ey.r.appspot.com"
+
+# Scaling configuration (Optional)
+automatic_scaling:
+  min_idle_instances: 0
+  max_instances: 5
+
+handlers:
+  # Serve static files from the dist directory
+  - url: /assets
+    static_dir: dist/assets
+
+  # All other routes go to the Node.js app
+  - url: /.*
+    script: auto
