@@ -1,20 +1,7 @@
 runtime: nodejs22
 instance_class: F1
-entrypoint: npx tsx server/index.ts
 
 env_variables:
   NODE_ENV: "production"
 
-handlers:
-  # Static assets (JS, CSS, Images)
-  - url: /assets
-    static_dir: dist/assets
-
-  # Static root files (favicon, etc)
-  - url: /(.*\.(json|ico|png|svg))$
-    static_files: dist/\1
-    upload: dist/.*\.(json|ico|png|svg)$
-
-  # Node.js API and SPA routing
-  - url: /.*
-    script: auto
+entrypoint: node dist/server/index.js

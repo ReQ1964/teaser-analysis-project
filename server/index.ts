@@ -13,60 +13,62 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 8080;
 
+// Konfiguracja ścieżek ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const rootDir = path.resolve(__dirname, '..');
 
-// --- Inicjalizacja Firebase (tylko Storage) ---
+/**
+ * Zgodnie z Twoim screenem:
+ * Serwer jest w: dist/server/index.js
+ * Frontend jest w: dist/
+ * Musimy wyjść o jeden poziom w górę (..), aby serwować pliki z dist/
+ */
+const distPath = path.resolve(__dirname, '..');
+
+// --- Inicjalizacja Google Cloud Services ---
 if (!admin.apps.length) {
   admin.initializeApp({
     projectId: 'project-e5e273bc-6800-4c40-a72',
     storageBucket: 'project-e5e273bc-6800-4c40-a72.appspot.com'
   });
-  console.log('Firebase initialized (Production Mode)');
 }
 
-const datastore = new Datastore({ projectId: 'project-e5e273bc-6800-4c40-a72' });
+const datastore = new Datastore();
 const bucket = admin.storage().bucket();
 const videoClient = new VideoIntelligenceServiceClient();
 
 // --- Middleware ---
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN || '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  origin: '*',
   credentials: true
 }));
 app.use(express.json());
-app.use(express.static(path.join(rootDir, 'dist')));
 
-// --- Multer ---
+// 1. Serwowanie plików statycznych (Vite build)
+app.use(express.static(distPath));
+
+// --- Multer (Konfiguracja dla plików do 50MB) ---
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: { fileSize: 50 * 1024 * 1024 }
 });
 
-// --- Endpoint: Upload ---
+// --- API: Upload ---
 app.post('/api/upload', upload.single('teaser'), async (req: any, res: any) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
+    if (!req.file) return res.status(400).json({ error: 'No file' });
 
     const { buffer, originalname, mimetype } = req.file;
     const destination = `teasers/${Date.now()}_${originalname}`;
     const file = bucket.file(destination);
 
-    await file.save(buffer, {
-      metadata: { contentType: mimetype },
-      resumable: false
-    });
+    await file.save(buffer, { metadata: { contentType: mimetype } });
 
     const gcsUri = `gs://${bucket.name}/${destination}`;
-
     const key = datastore.key('teasers');
-    const entity = {
+
+    await datastore.save({
       key,
       data: {
         name: originalname,
@@ -75,69 +77,62 @@ app.post('/api/upload', upload.single('teaser'), async (req: any, res: any) => {
         gcsUri,
         createdAt: new Date().toISOString()
       }
-    };
-    await datastore.save(entity);
+    });
 
-    const id = key.id?.toString() || key.name?.toString() || '';
-    processVideo(gcsUri, id);
+    const id = key.id || key.name;
+    // @ts-ignore
+    processVideo(gcsUri, id!.toString());
 
     res.status(200).json({ id, message: 'Processing started' });
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 
-// --- Endpoint: Get Teasers ---
+// --- API: Get Teasers ---
 app.get('/api/teasers', async (_req: any, res: any) => {
   try {
     const query = datastore.createQuery('teasers').order('createdAt', { descending: true });
     const [entities] = await datastore.runQuery(query);
-
-    const teasers = entities.map(entity => ({
-      id: entity[datastore.KEY].id || entity[datastore.KEY].name,
-      ...entity
+    const teasers = entities.map(e => ({
+      id: e[datastore.KEY].id || e[datastore.KEY].name,
+      ...e
     }));
-
     res.json(teasers);
   } catch (error) {
-    console.error('Fetch error:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Get teasers error:', error);
+    res.status(500).send(error);
   }
 });
 
-// --- Funkcja przetwarzająca wideo ---
+// --- Funkcja Video Intelligence (Background) ---
 async function processVideo(gcsUri: string, docId: string) {
   try {
-    const request = {
+    const [operation] = await videoClient.annotateVideo({
       inputUri: gcsUri,
       features: ['LABEL_DETECTION' as any],
-    };
-
-    const [operation] = await videoClient.annotateVideo(request);
-    const [operationResult] = await operation.promise();
-
-    const annotations = operationResult.annotationResults?.[0];
-    const labels = annotations?.segmentLabelAnnotations || [];
-    const tags = labels.map(label => label.entity!.description);
+    });
+    const [result] = await operation.promise();
+    const tags = result.annotationResults?.[0].segmentLabelAnnotations?.map(l => l.entity!.description) || [];
 
     const key = datastore.key(['teasers', parseInt(docId)]);
     const [existing] = await datastore.get(key);
-    await datastore.save({
-      key,
-      data: { ...existing, tags, status: 'processed' }
-    });
-  } catch (error) {
-    console.error('Video processing error:', error);
-    const key = datastore.key(['teasers', parseInt(docId)]);
-    const [existing] = await datastore.get(key);
-    await datastore.save({
-      key,
-      data: { ...existing, status: 'error' }
-    });
+    await datastore.save({ key, data: { ...existing, tags, status: 'processed' } });
+  } catch (e) {
+    console.error('Video processing error:', e);
   }
 }
 
+// --- Obsługa React Router (Wildcard) ---
+/** * Używamy (.*) zamiast *, aby uniknąć błędu PathError w Express 5.x/Node 22
+ * Ta ścieżka MUSI być na samym końcu.
+ */
+app.all("/{*splat}", (_req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Serving static files from: ${distPath}`);
 });
