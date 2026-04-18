@@ -1,140 +1,143 @@
-import express from 'express'
-import cors from 'cors'
-import dotenv from 'dotenv'
-import multer from 'multer'
-import admin from 'firebase-admin'
-import { VideoIntelligenceServiceClient } from '@google-cloud/video-intelligence'
-import fs from 'fs'
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import multer from 'multer';
+import admin from 'firebase-admin';
+import { VideoIntelligenceServiceClient } from '@google-cloud/video-intelligence';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { Datastore } from '@google-cloud/datastore';
 
-dotenv.config()
+dotenv.config();
 
-const app = express()
-const port = process.env.PORT || 3000
+const app = express();
+const PORT = process.env.PORT || 8080;
 
-const serviceAccountPath = process.env.GOOGLE_APPLICATION_CREDENTIALS || './server/service-account.json'
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootDir = path.resolve(__dirname, '..');
 
-if (fs.existsSync(serviceAccountPath)) {
+// --- Inicjalizacja Firebase (tylko Storage) ---
+if (!admin.apps.length) {
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccountPath),
-    storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET,
-    databaseURL: process.env.FIREBASE_DATABASE_URL
-  })
-} else {
-  console.warn('Service account file not found. Firebase Admin not initialized. Use placeholders.')
+    projectId: 'project-e5e273bc-6800-4c40-a72',
+    storageBucket: 'project-e5e273bc-6800-4c40-a72.appspot.com'
+  });
+  console.log('Firebase initialized (Production Mode)');
 }
 
-const db = admin.apps.length ? admin.firestore() : null
-const bucket = admin.apps.length ? admin.storage().bucket() : null
-const videoClient = new VideoIntelligenceServiceClient()
+const datastore = new Datastore({ projectId: 'project-e5e273bc-6800-4c40-a72' });
+const bucket = admin.storage().bucket();
+const videoClient = new VideoIntelligenceServiceClient();
 
+// --- Middleware ---
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || '*',
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
-}))
-app.use(express.json())
+}));
+app.use(express.json());
+app.use(express.static(path.join(rootDir, 'dist')));
 
-const upload = multer({ dest: 'uploads/' })
+// --- Multer ---
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
 
-const __dirname = path.resolve()
-app.use(express.static(path.join(__dirname, 'dist')))
-
+// --- Endpoint: Upload ---
 app.post('/api/upload', upload.single('teaser'), async (req: any, res: any) => {
   try {
-    if (!req.file || !db || !bucket) {
-      return res.status(400).json({ error: 'Missing file or Firebase not configured' })
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const { path: filePath, originalname } = req.file
-    const destination = `teasers/${Date.now()}_${originalname}`
+    const { buffer, originalname, mimetype } = req.file;
+    const destination = `teasers/${Date.now()}_${originalname}`;
+    const file = bucket.file(destination);
 
-    await bucket.upload(filePath, {
-      destination,
-      metadata: { contentType: req.file.mimetype }
-    })
+    await file.save(buffer, {
+      metadata: { contentType: mimetype },
+      resumable: false
+    });
 
-    const gcsUri = `gs://${bucket.name}/${destination}`
+    const gcsUri = `gs://${bucket.name}/${destination}`;
 
-    const teaserRef = await db.collection('teasers').add({
-      name: originalname,
-      status: 'processing',
-      tags: [],
-      gcsUri,
-      createdAt: new Date().toISOString()
-    })
+    const key = datastore.key('teasers');
+    const entity = {
+      key,
+      data: {
+        name: originalname,
+        status: 'processing',
+        tags: [],
+        gcsUri,
+        createdAt: new Date().toISOString()
+      }
+    };
+    await datastore.save(entity);
 
-    processVideo(gcsUri, teaserRef.id)
+    const id = key.id?.toString() || key.name?.toString() || '';
+    processVideo(gcsUri, id);
 
-    fs.unlinkSync(filePath)
-
-    res.status(200).json({ id: teaserRef.id, message: 'Processing started' })
+    res.status(200).json({ id, message: 'Processing started' });
   } catch (error) {
-    console.error('Upload error:', error)
-    res.status(500).json({ error: 'Internal server error' })
+    console.error('Upload error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
-})
+});
 
-// 2. Get Teasers
-app.get('/api/teasers', async (req: any, res: any) => {
+// --- Endpoint: Get Teasers ---
+app.get('/api/teasers', async (_req: any, res: any) => {
   try {
-    if (!db) {
-      return res.json([
-        { id: '1', name: 'Cool Teaser.mp4', status: 'processed', tags: ['Nature', 'Sky'], createdAt: new Date().toISOString() },
-        { id: '2', name: 'Product Demo.mov', status: 'processing', tags: [], createdAt: new Date().toISOString() }
-      ])
-    }
+    const query = datastore.createQuery('teasers').order('createdAt', { descending: true });
+    const [entities] = await datastore.runQuery(query);
 
-    const snapshot = await db.collection('teasers').orderBy('createdAt', 'desc').get()
-    const teasers = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
-    res.json(teasers)
+    const teasers = entities.map(entity => ({
+      id: entity[datastore.KEY].id || entity[datastore.KEY].name,
+      ...entity
+    }));
+
+    res.json(teasers);
   } catch (error) {
-    console.error('Fetch error:', error)
-    res.status(500).json({ error: 'Internal server error' })
+    console.error('Fetch error:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
-})
+});
 
-// --- Helper Functions ---
-
+// --- Funkcja przetwarzająca wideo ---
 async function processVideo(gcsUri: string, docId: string) {
   try {
     const request = {
       inputUri: gcsUri,
       features: ['LABEL_DETECTION' as any],
-    }
+    };
 
-    const [operation] = await videoClient.annotateVideo(request)
-    console.log(`Waiting for operation to complete on ${gcsUri}...`)
+    const [operation] = await videoClient.annotateVideo(request);
+    const [operationResult] = await operation.promise();
 
-    const [operationResult] = await operation.promise()
-    const annotations = operationResult.annotationResults![0]
-    const labels = annotations.segmentLabelAnnotations || []
-    
-    // Extract tag names
-    const tags = labels.map(label => label.entity!.description)
+    const annotations = operationResult.annotationResults?.[0];
+    const labels = annotations?.segmentLabelAnnotations || [];
+    const tags = labels.map(label => label.entity!.description);
 
-    // Update Firestore
-    if (db) {
-      await db.collection('teasers').doc(docId).update({
-        tags,
-        status: 'processed'
-      })
-    }
-    console.log(`Processing complete for ${docId}`)
+    const key = datastore.key(['teasers', parseInt(docId)]);
+    const [existing] = await datastore.get(key);
+    await datastore.save({
+      key,
+      data: { ...existing, tags, status: 'processed' }
+    });
   } catch (error) {
-    console.error('Video processing error:', error)
-    if (db) {
-      await db.collection('teasers').doc(docId).update({
-        status: 'error'
-      })
-    }
+    console.error('Video processing error:', error);
+    const key = datastore.key(['teasers', parseInt(docId)]);
+    const [existing] = await datastore.get(key);
+    await datastore.save({
+      key,
+      data: { ...existing, status: 'error' }
+    });
   }
 }
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'))
-})
-
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}`)
-})
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});

@@ -25,7 +25,7 @@ interface Teaser {
 export default function TeaserList() {
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
-  const itemsPerPage = 5
+  const itemsPerPage = 2
 
   const { data: teasers = [], isLoading, isError } = useQuery<Teaser[]>({
     queryKey: ['teasers'],

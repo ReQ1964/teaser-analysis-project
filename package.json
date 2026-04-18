@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "server": "nodemon --watch 'server/**/*.ts' --exec 'tsx' server/index.ts",
-    "start": "tsx server/index.ts",
+    "start": "npx tsx server/index.ts",
+    "gcp-build": "tsc && vite build",
     "build": "tsc && vite build",
     "preview": "vite preview"
   },
@@ -19,11 +20,11 @@
     "@vitejs/plugin-react": "^6.0.1",
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
-    "tsx": "^4.21.0",
     "typescript": "~6.0.2",
     "vite": "^8.0.4"
   },
   "dependencies": {
+    "@google-cloud/datastore": "^10.1.0",
     "@google-cloud/video-intelligence": "^6.2.1",
     "@mantine/core": "^9.0.2",
     "@mantine/dropzone": "^9.0.2",
@@ -38,6 +39,7 @@
     "firebase-admin": "^13.8.0",
     "multer": "^2.1.1",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5"
+    "react-dom": "^19.2.5",
+    "tsx": "^4.21.0"
   }
 }
